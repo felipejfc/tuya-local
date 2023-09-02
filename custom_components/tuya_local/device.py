@@ -29,10 +29,14 @@ from .helpers.config import get_device_id
 from .helpers.device_config import possible_matches
 from .helpers.log import log_json
 
+from .gateway import TuyaLocalGateway
+
 _LOGGER = logging.getLogger(__name__)
 
 
 class TuyaLocalDevice(object):
+    Gateways = {}
+
     def __init__(
         self,
         name,
@@ -67,11 +71,18 @@ class TuyaLocalDevice(object):
         self._api_working_protocol_failures = 0
         try:
             if dev_cid is not None:
+                gw = TuyaLocalDevice.Gateways.get(dev_id)
+                if gw is None:
+                    gw = TuyaLocalGateway(
+                        dev_id, address, local_key, protocol_version, hass
+                    )
+                    TuyaLocalDevice.Gateways[dev_id] = gw
                 self._api = tinytuya.Device(
-                    dev_id,
+                    dev_cid,
                     cid=dev_cid,
-                    parent=tinytuya.Device(dev_id, address, local_key),
+                    parent=gw._api,
                 )
+                gw._subdevices.append(self)
             else:
                 self._api = tinytuya.Device(dev_id, address, local_key)
             self.dev_cid = dev_cid
@@ -194,34 +205,38 @@ class TuyaLocalDevice(object):
         if not self._children:
             await self.async_stop()
 
+    def update_entities(self, poll):
+        _LOGGER.debug(
+            "%s received %s",
+            self.name,
+            log_json(poll),
+        )
+
+        if type(poll) is dict:
+            full_poll = poll.pop("full_poll", False)
+            self._cached_state = self._cached_state | poll
+            self._cached_state["updated_at"] = time()
+            self._remove_properties_from_pending_updates(poll)
+
+            for entity in self._children:
+                # clear non-persistant dps that were not in a full poll
+                if full_poll:
+                    for dp in entity._config.dps():
+                        if not dp.persist and dp.id not in poll:
+                            self._cached_state.pop(dp.id, None)
+                entity.async_write_ha_state()
+        else:
+            _LOGGER.debug(
+                "%s received non data %s",
+                self.name,
+                log_json(poll),
+            )
+
     async def receive_loop(self):
         """Coroutine wrapper for async_receive generator."""
         try:
             async for poll in self.async_receive():
-                if type(poll) is dict:
-                    _LOGGER.debug(
-                        "%s received %s",
-                        self.name,
-                        log_json(poll),
-                    )
-                    full_poll = poll.pop("full_poll", False)
-                    self._cached_state = self._cached_state | poll
-                    self._cached_state["updated_at"] = time()
-                    self._remove_properties_from_pending_updates(poll)
-
-                    for entity in self._children:
-                        # clear non-persistant dps that were not in a full poll
-                        if full_poll:
-                            for dp in entity._config.dps():
-                                if not dp.persist and dp.id not in poll:
-                                    self._cached_state.pop(dp.id, None)
-                        entity.async_write_ha_state()
-                else:
-                    _LOGGER.debug(
-                        "%s received non data %s",
-                        self.name,
-                        log_json(poll),
-                    )
+                self.update_entities(poll)
             _LOGGER.warning("%s receive loop has terminated", self.name)
 
         except Exception as t:
@@ -288,7 +303,7 @@ class TuyaLocalDevice(object):
                         )
                         dps_updated = False
                         full_poll = True
-                elif persist:
+                elif persist and self._api.parent is None:
                     await self._hass.async_add_executor_job(
                         self._api.heartbeat,
                         True,

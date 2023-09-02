@@ -6,9 +6,12 @@
   "files.trimTrailingWhitespace": true,
   "python.linting.pylintEnabled": true,
   "python.linting.enabled": true,
-  "python.formatting.provider": "black",
+  "python.formatting.provider": "none",
   "black-formatter.importStrategy": "fromEnvironment",
   "python.testing.pytestEnabled": true,
   "pylint.importStrategy": "fromEnvironment",
   "python.linting.lintOnSave": true,
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter"
+  }
 }
